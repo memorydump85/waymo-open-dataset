@@ -1,11 +1,13 @@
+import itertools
 import os
+import sys
 from typing import NamedTuple
-import tensorflow.compat.v1 as tf
+
 import math
 import numpy as np
 from pathlib import Path
-import itertools
 
+import tensorflow.compat.v1 as tf
 tf.enable_eager_execution()
 
 from waymo_open_dataset.utils import range_image_utils
@@ -23,7 +25,7 @@ class FrameInfo:
         self.range_images, self.camera_projections, self.range_image_top_pose = (
             frame_utils.parse_range_image_and_camera_projection(frame))
 
-
+'''
 def extract_polar_and_cartesian_from_range_image(range_image,
                                                  extrinsic,
                                                  inclination,
@@ -133,6 +135,30 @@ def lidar1_project_labels_on_range_image(frame_info: FrameInfo):
         print(range_image_points.shape)
         range_image_points = tf.einsum('bkr,bijr->bijk', sensor_from_vehicle_rotation,
                                     range_image_points) + sensor_from_vehicle_translation
+'''
+
+
+def save_ply(points: np.ndarray, out_path: Path, transform=None, format='binary_little_endian') -> None:
+    assert format in ('ascii', 'binary_little_endian'), "Invalid PLY format!"
+    if transform is not None:
+        points[:, 3:] = (transform[:3, :3] @ points[:, 3:].T + transform[:3, 3:]).T
+    with out_path.open('wb') as f:
+        f.write(("ply\n" +
+                f"format {format} 1.0\n" +
+                f"element vertex {len(points)}\n" +
+                 "property float x\n" +
+                 "property float y\n" +
+                 "property float z\n" +
+                 "property float intensity\n" +
+                 "property float elongation\n" +
+                 "end_header\n").encode('ascii'))
+        if format == 'ascii':
+            for p in points:
+                _range, i, e, x, y, z = p
+                f.write(f'{x:.3f} {y:.3f} {z:.3f} {i:.3f} {e:.3f}\n')
+        if format == 'binary_little_endian':
+            assert sys.byteorder == 'little'
+            f.write(points[:, [3, 4, 5, 1, 2]].tobytes())
 
 
 def create_visualizations(frame_info: FrameInfo, filename_prefix: str):
@@ -175,8 +201,8 @@ def create_visualizations(frame_info: FrameInfo, filename_prefix: str):
         range_image_elongation = range_image_tensor[...,2]
 
         def adjust_im(im, p=0.5):
-            from scipy.signal import medfilt2d
-            im = np.power(medfilt2d(im, 3), p)
+            # from scipy.signal import medfilt2d
+            im = np.power(im, p)
             return im
 
         plot_range_image_helper(adjust_im(range_image_range.numpy(), 1), 'range',
@@ -189,27 +215,8 @@ def create_visualizations(frame_info: FrameInfo, filename_prefix: str):
     frame_info.src_frame.lasers.sort(key=lambda laser: laser.name)
     show_range_image(frame_info.range_images[open_dataset.LaserName.TOP][0], 1)
     plt.tight_layout()
-    plt.savefig('/tmp/plot_range.png')
+    plt.savefig(Path(f'/tmp/{filename_prefix}.png'))
     plt.close(fig)
-
-    def save_ply(points: np.ndarray, out_path: Path, transform=None) -> None:
-        if transform is not None:
-            points[:, 3:] = (transform[:3, :3] @ points[:, 3:].T + transform[:3, 3:]).T
-        with out_path.open('w') as f:
-            f.write(
-                "ply\n" +
-                "format ascii 1.0\n" +
-               f"element vertex {len(points)}\n" +
-                "property float x\n" +
-                "property float y\n" +
-                "property float z\n" +
-                "property float intensity\n" +
-                "property float elongation\n" +
-                "end_header\n"
-            )
-            for p in points:
-                _range, i, e, x, y, z = p
-                f.write(f'{x:.3f} {y:.3f} {z:.3f} {i:.3f} {e:.3f}\n')
 
     points, cp_points = frame_utils.convert_range_image_to_point_cloud(
         frame_info.src_frame,
