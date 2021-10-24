@@ -3,18 +3,20 @@ import os
 import sys
 from typing import NamedTuple
 
-import math
+import google.protobuf as pb
 import numpy as np
+import matplotlib.pyplot as plt
 from pathlib import Path
+import PIL
 
 import tensorflow.compat.v1 as tf
 tf.enable_eager_execution()
 
-from waymo_open_dataset.utils import range_image_utils
-from waymo_open_dataset.utils import transform_utils
+from waymo_open_dataset.utils import box_utils
+from waymo_open_dataset import dataset_pb2 as open_dataset
 from waymo_open_dataset.utils import frame_utils
 from waymo_open_dataset.utils import range_image_utils
-from waymo_open_dataset import dataset_pb2 as open_dataset
+from waymo_open_dataset.utils import transform_utils
 
 
 class FrameInfo:
@@ -161,80 +163,119 @@ def save_ply(points: np.ndarray, out_path: Path, transform=None, format='binary_
             f.write(points[:, [3, 4, 5, 1, 2]].tobytes())
 
 
-def create_visualizations(frame_info: FrameInfo, filename_prefix: str):
-    import matplotlib.pyplot as plt
-    import matplotlib.patches as patches
+def plot_range_image_helper(data, name, layout=None, vmin = 0, vmax=1, cmap='gray'):
+    """Plots range image.
 
+    Args:
+        data: range image data
+        name: the image title
+        layout: plt layout
+        vmin: minimum value of the passed data
+        vmax: maximum value of the passed data
+        cmap: color map
+    """
+    if layout: plt.subplot(*layout)
+    plt.imshow(data, cmap=cmap, vmin=vmin, vmax=vmax)
+    plt.title(name)
+    plt.grid(False)
+    plt.axis('off')
+
+
+def show_range_image_channels(range_image_tensor, layout_index_start = 1):
+    """Shows range image.
+
+    Args:
+        range_image_tensor: the range image data from a given lidar
+            converted to a float tf.Tensor of the correct shape.
+        layout_index_start: layout offset
+    """
+    lidar_image_mask = tf.greater_equal(range_image_tensor, 0)
+    range_image_tensor = tf.where(lidar_image_mask, range_image_tensor,
+                                    tf.ones_like(range_image_tensor) * 1e10)
+    range_image_range = range_image_tensor[...,0] 
+    range_image_intensity = range_image_tensor[...,1]
+    range_image_elongation = range_image_tensor[...,2]
+
+    def adjust_im(im, p=0.5):
+        # from scipy.signal import medfilt2d
+        im = np.power(im, p)
+        return im
+
+    plot_range_image_helper(adjust_im(range_image_range.numpy(), 1), 'range',
+                    [3, 1, layout_index_start], vmax=75, cmap='gray')
+    plot_range_image_helper(adjust_im(range_image_intensity.numpy()), 'intensity',
+                    [3, 1, layout_index_start + 1], vmax=1.5, cmap='gray')
+    plot_range_image_helper(adjust_im(range_image_elongation.numpy(), 0.25), 'elongation',
+                    [3, 1, layout_index_start + 2], vmax=1.5, cmap='gray')
+
+
+def export_data(frame_info: FrameInfo,
+                out_dir: Path,
+                filename_prefix: str,
+                write_visualization_files: bool=True) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # return info image tensor
+    top_lidar_first_return_raw = frame_info.range_images[open_dataset.LaserName.TOP][0]
+    top_lidar_first_returns = tf.convert_to_tensor(top_lidar_first_return_raw.data)
+    top_lidar_first_returns = tf.reshape(top_lidar_first_returns,
+                                top_lidar_first_return_raw.shape.dims)
+
+    # indicator arrays for point labels
+    cartesian = frame_utils.convert_range_image_to_cartesian(
+        frame_info.src_frame,
+        frame_info.range_images,
+        frame_info.range_image_top_pose,
+        ri_index=0)
+    ri_shape = cartesian[open_dataset.LaserName.TOP].shape
+    cartesian_flat = tf.reshape(cartesian[open_dataset.LaserName.TOP], (-1, 3))
+    
+    def box_info_array(b) -> np.array:
+        return np.array(
+            [b.center_x, b.center_y, b.center_z, b.length, b.width, b.height, b.heading],
+            dtype=np.float32)
+
+    label_boxes = np.vstack([box_info_array(a.box)
+                                for a in frame_info.src_frame.laser_labels if a.HasField('box')])
+    box_indicator = box_utils.is_within_box_3d(cartesian_flat, label_boxes).numpy()
+    box_indices = (box_indicator * np.arange(1, len(label_boxes) + 1)).max(axis=-1)
+    box_indices_reshaped = box_indices.reshape(*ri_shape[:2])
+
+    out_data = np.dstack([top_lidar_first_returns.numpy(), box_indices_reshaped])
+    np.save(out_dir / f'{filename_prefix}.npy', out_data, allow_pickle=False)
+
+    if not write_visualization_files:
+        return
+
+    # Save a visualization of the range image
     fig = plt.figure(figsize=(64, 20))
-
-    def plot_range_image_helper(data, name, layout, vmin = 0, vmax=1, cmap='gray'):
-        """Plots range image.
-
-        Args:
-            data: range image data
-            name: the image title
-            layout: plt layout
-            vmin: minimum value of the passed data
-            vmax: maximum value of the passed data
-            cmap: color map
-        """
-        plt.subplot(*layout)
-        plt.imshow(data, cmap=cmap, vmin=vmin, vmax=vmax)
-        plt.title(name)
-        plt.grid(False)
-        plt.axis('off')
-
-    def show_range_image(range_image, layout_index_start = 1):
-        """Shows range image.
-
-        Args:
-            range_image: the range image data from a given lidar of type MatrixFloat.
-            layout_index_start: layout offset
-        """
-        range_image_tensor = tf.convert_to_tensor(range_image.data)
-        range_image_tensor = tf.reshape(range_image_tensor, range_image.shape.dims)
-        lidar_image_mask = tf.greater_equal(range_image_tensor, 0)
-        range_image_tensor = tf.where(lidar_image_mask, range_image_tensor,
-                                        tf.ones_like(range_image_tensor) * 1e10)
-        range_image_range = range_image_tensor[...,0] 
-        range_image_intensity = range_image_tensor[...,1]
-        range_image_elongation = range_image_tensor[...,2]
-
-        def adjust_im(im, p=0.5):
-            # from scipy.signal import medfilt2d
-            im = np.power(im, p)
-            return im
-
-        plot_range_image_helper(adjust_im(range_image_range.numpy(), 1), 'range',
-                        [3, 1, layout_index_start], vmax=75, cmap='gray')
-        plot_range_image_helper(adjust_im(range_image_intensity.numpy()), 'intensity',
-                        [3, 1, layout_index_start + 1], vmax=1.5, cmap='gray')
-        plot_range_image_helper(adjust_im(range_image_elongation.numpy(), 0.25), 'elongation',
-                        [3, 1, layout_index_start + 2], vmax=1.5, cmap='gray')
-
     frame_info.src_frame.lasers.sort(key=lambda laser: laser.name)
-    show_range_image(frame_info.range_images[open_dataset.LaserName.TOP][0], 1)
+    show_range_image_channels(top_lidar_first_returns, 1)
     plt.tight_layout()
-    plt.savefig(Path(f'/tmp/{filename_prefix}.png'))
+    plt.savefig(Path(out_dir / f'{filename_prefix}.png'))
     plt.close(fig)
 
-    points, cp_points = frame_utils.convert_range_image_to_point_cloud(
+    # Convert the range image to a point cloud and save a .PLY
+    points, _cp_points = frame_utils.convert_range_image_to_point_cloud(
         frame_info.src_frame,
         frame_info.range_images,
         frame_info.camera_projections,
         frame_info.range_image_top_pose,
         keep_polar_features=True,
         ri_index=0)
-    save_ply(points[0], Path(f'/tmp/{filename_prefix}_r0.ply'), transform=frame_info.world_from_frame)
 
-    points, cp_points = frame_utils.convert_range_image_to_point_cloud(
-        frame_info.src_frame,
-        frame_info.range_images,
-        frame_info.camera_projections,
-        frame_info.range_image_top_pose,
-        keep_polar_features=True,
-        ri_index=1)
-    save_ply(points[0], Path(f'/tmp/{filename_prefix}_r1.ply'), transform=frame_info.world_from_frame)
+    TOP_LIDAR = 0
+    save_ply(points[TOP_LIDAR], Path(out_dir / f'{filename_prefix}_r0.ply'), transform=frame_info.world_from_frame)
+
+    # Save a visualization of box labels on the lidar intensity image
+    fig = plt.figure(figsize=(64, 20))
+    intensity_im = top_lidar_first_returns[..., 1].numpy()
+    intensity_im = intensity_im ** 0.5
+    intensity_im = np.dstack([intensity_im, intensity_im, intensity_im])
+    intensity_im[:,:,0] = (box_indices_reshaped > 0) * 255  # highlight labels in red
+    plot_range_image_helper(intensity_im, 'labels', cmap=None)
+    plt.savefig(out_dir / f'boxes.{filename_prefix}.png')
+    plt.close(fig)
 
 
 def main():
@@ -242,12 +283,14 @@ def main():
     dataset = tf.data.TFRecordDataset(FILENAME, compression_type='')
     print(len([d for d in dataset]), 'frames')
     for i, data in enumerate(dataset):
+        if i < 130: continue
         frame = open_dataset.Frame()
         frame.ParseFromString(bytearray(data.numpy()))
         frame_info = FrameInfo(frame)
-        print('Frame', i)
-        create_visualizations(frame_info, filename_prefix=f'{i:04d}')
-        # lidar1_project_labels_on_range_image(frame_info)
+        print('Frame', i, frame.context.name)
+        export_data(frame_info,
+                    out_dir=Path(f'/tmp/waymo_od_lidar/{frame.context.name}'),
+                    filename_prefix=f'{i:06d}')
 
 if __name__ == '__main__':
     main()
