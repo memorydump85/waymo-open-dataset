@@ -141,6 +141,7 @@ def lidar1_project_labels_on_range_image(frame_info: FrameInfo):
 
 
 def save_ply(points: np.ndarray, out_path: Path, transform=None, format='binary_little_endian') -> None:
+    assert points.dtype == np.float32
     assert format in ('ascii', 'binary_little_endian'), "Invalid PLY format!"
     if transform is not None:
         points[:, 3:] = (transform[:3, :3] @ points[:, 3:].T + transform[:3, 3:]).T
@@ -157,7 +158,7 @@ def save_ply(points: np.ndarray, out_path: Path, transform=None, format='binary_
         if format == 'ascii':
             for p in points:
                 _range, i, e, x, y, z = p
-                f.write(f'{x:.3f} {y:.3f} {z:.3f} {i:.3f} {e:.3f}\n')
+                f.write(f'{x:.3f} {y:.3f} {z:.3f} {i:.3f} {e:.3f}\n'.encode())
         if format == 'binary_little_endian':
             assert sys.byteorder == 'little'
             f.write(points[:, [3, 4, 5, 1, 2]].tobytes())
@@ -209,10 +210,52 @@ def show_range_image_channels(range_image_tensor, layout_index_start = 1):
                     [3, 1, layout_index_start + 2], vmax=1.5, cmap='gray')
 
 
+def samples_on_line(xyz1: np.ndarray, xyz2: np.ndarray, num: int=100) -> np.ndarray:
+    assert xyz1.shape == (3,), "param `xyz1` must be a single 3D point"
+    assert xyz2.shape == (3,), "param `xyz2` must be a single 3D point"
+    xyz1, xyz2 = xyz1[None, :], xyz2[None, :]
+    t = np.linspace(0, 1, num)[None, :]
+    return np.einsum('ij,ik', t, xyz1) + np.einsum('ij,ik', 1 - t, xyz2)
+
+
+def unit_square_3d(z: float) -> np.ndarray:
+    return np.array([[-1., -1., z],
+                     [+1., -1., z],
+                     [+1., +1., z],
+                     [-1., +1., z]], dtype=np.float32)
+
+def _unit_box_3D():
+    p, q = unit_square_3d(z=-1.), unit_square_3d(z=1.)
+    return np.vstack([samples_on_line(a, b) for a, b in [(p[0], p[1]),
+                                                         (p[1], p[2]),
+                                                         (p[2], p[3]),
+                                                         (p[3], p[0]),
+                                                         (q[0], q[1]),
+                                                         (q[1], q[2]),
+                                                         (q[2], q[3]),
+                                                         (q[3], q[0]),
+                                                         (p[1], q[1]),
+                                                         (p[2], q[2]),
+                                                         (p[3], q[0]),
+                                                         (p[0], q[3])]])
+UNIT_BOX_POINTS_3D = _unit_box_3D()
+
+
+def make_box_points(b) -> np.ndarray:
+    a = b.heading
+    R = np.array([[np.cos(a),  -np.sin(a),  0.],
+                  [np.sin(a),   np.cos(a),  0.],
+                  [        0,           0,  1.]])
+    scale = np.r_[b.length, b.width, b.height] * .5
+    offset = np.r_[b.center_x, b.center_y, b.center_z]
+    p = UNIT_BOX_POINTS_3D * scale
+    return ((R @ p.T).T + offset).astype(np.float32)
+
+
 def export_data(frame_info: FrameInfo,
                 out_dir: Path,
                 filename_prefix: str,
-                write_visualization_files: bool=True) -> None:
+                write_visualization_files: bool=False) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # return info image tensor
@@ -237,10 +280,13 @@ def export_data(frame_info: FrameInfo,
 
     label_boxes = np.vstack([box_info_array(a.box)
                                 for a in frame_info.src_frame.laser_labels if a.HasField('box')])
-    box_indicator = box_utils.is_within_box_3d(cartesian_flat, label_boxes).numpy()
-    box_indices = (box_indicator * np.arange(1, len(label_boxes) + 1)).max(axis=-1)
+    box_1hot = box_utils.is_within_box_3d(cartesian_flat, label_boxes).numpy()
+    box_indices = (box_1hot * np.arange(len(label_boxes))).max(axis=-1)
+    nobox = (box_1hot.any(axis=-1) == False)
+    box_indices = np.where(nobox, np.full_like(box_indices, -1), box_indices)
     box_indices_reshaped = box_indices.reshape(*ri_shape[:2])
 
+    # Save lidar return data
     out_data = np.dstack([top_lidar_first_returns.numpy(), box_indices_reshaped])
     np.save(out_dir / f'{filename_prefix}.npy', out_data, allow_pickle=False)
 
@@ -256,6 +302,7 @@ def export_data(frame_info: FrameInfo,
     plt.close(fig)
 
     # Convert the range image to a point cloud and save a .PLY
+    TOP_LIDAR = 0
     points, _cp_points = frame_utils.convert_range_image_to_point_cloud(
         frame_info.src_frame,
         frame_info.range_images,
@@ -263,9 +310,22 @@ def export_data(frame_info: FrameInfo,
         frame_info.range_image_top_pose,
         keep_polar_features=True,
         ri_index=0)
-
-    TOP_LIDAR = 0
     save_ply(points[TOP_LIDAR], Path(out_dir / f'{filename_prefix}_r0.ply'), transform=frame_info.world_from_frame)
+    points, _cp_points = frame_utils.convert_range_image_to_point_cloud(
+        frame_info.src_frame,
+        frame_info.range_images,
+        frame_info.camera_projections,
+        frame_info.range_image_top_pose,
+        keep_polar_features=True,
+        ri_index=1)
+    save_ply(points[TOP_LIDAR], Path(out_dir / f'{filename_prefix}_r1.ply'), transform=frame_info.world_from_frame)
+
+    # Save PLYs of boxes
+    for i, a in enumerate(frame_info.src_frame.laser_labels):
+        if not a.HasField('box'): continue
+        p = make_box_points(a.box)
+        rie_p = np.hstack([np.zeros((len(p), 3), dtype=np.float32), p])
+        save_ply(rie_p, Path(out_dir) / f'{filename_prefix}.box{i:03d}.ply', transform=frame_info.world_from_frame)
 
     # Save a visualization of box labels on the lidar intensity image
     fig = plt.figure(figsize=(64, 20))
@@ -283,7 +343,6 @@ def main():
     dataset = tf.data.TFRecordDataset(FILENAME, compression_type='')
     print(len([d for d in dataset]), 'frames')
     for i, data in enumerate(dataset):
-        if i < 130: continue
         frame = open_dataset.Frame()
         frame.ParseFromString(bytearray(data.numpy()))
         frame_info = FrameInfo(frame)
