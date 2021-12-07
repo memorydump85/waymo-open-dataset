@@ -288,6 +288,7 @@ def export_data(frame_info: FrameInfo,
 
     # Save lidar return data
     out_data = np.dstack([top_lidar_first_returns.numpy(), box_indices_reshaped])
+    out_data = np.einsum('hwc->chw', out_data).astype(np.float32)
     np.save(out_dir / f'{filename_prefix}.npy', out_data, allow_pickle=False)
 
     if not write_visualization_files:
