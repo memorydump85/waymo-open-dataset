@@ -273,21 +273,30 @@ def export_data(frame_info: FrameInfo,
     ri_shape = cartesian[open_dataset.LaserName.TOP].shape
     cartesian_flat = tf.reshape(cartesian[open_dataset.LaserName.TOP], (-1, 3))
     
-    def box_info_array(b) -> np.array:
+    def box_info_to_array(b) -> np.array:
         return np.array(
             [b.center_x, b.center_y, b.center_z, b.length, b.width, b.height, b.heading],
             dtype=np.float32)
 
-    label_boxes = np.vstack([box_info_array(a.box)
+    # label_boxes.shape: (num_labels, 7)
+    label_boxes = np.vstack([box_info_to_array(a.box)
                                 for a in frame_info.src_frame.laser_labels if a.HasField('box')])
+
+    # box_1hot.shape: (num_range_image_pixels, num_labels)
     box_1hot = box_utils.is_within_box_3d(cartesian_flat, label_boxes).numpy()
+    # box_indices.shape: (num_range_image_pixels,)
     box_indices = (box_1hot * np.arange(len(label_boxes))).max(axis=-1)
     nobox = (box_1hot.any(axis=-1) == False)
-    box_indices = np.where(nobox, np.full_like(box_indices, -1), box_indices)
-    box_indices_reshaped = box_indices.reshape(*ri_shape[:2])
+    INVALID_VALUE = np.full_like(box_indices, -1)
+    # shape of all arrays below: (range_image_height, range_image_width) = (64, 2650)
+    box_indices_imshaped = np.where(nobox, INVALID_VALUE, box_indices).reshape(*ri_shape[:2])  # box index or -1
+    num_box_props = label_boxes.shape[1]
+    box_info_imshaped = [np.where(nobox, INVALID_VALUE, label_boxes[box_indices][:, i]).reshape(*ri_shape[:2])
+                            for i in range(num_box_props)]
 
     # Save lidar return data
-    out_data = np.dstack([top_lidar_first_returns.numpy(), box_indices_reshaped])
+    out_data = np.dstack([top_lidar_first_returns.numpy(), box_indices_imshaped, *box_info_imshaped])
+    # out_data.shape: (12, range_image_height, range_image_width) = (12, 64, 2650)
     out_data = np.einsum('hwc->chw', out_data).astype(np.float32)
     np.save(out_dir / f'{filename_prefix}.npy', out_data, allow_pickle=False)
 
@@ -333,7 +342,7 @@ def export_data(frame_info: FrameInfo,
     intensity_im = top_lidar_first_returns[..., 1].numpy()
     intensity_im = intensity_im ** 0.5
     intensity_im = np.dstack([intensity_im, intensity_im, intensity_im])
-    intensity_im[:,:,0] = (box_indices_reshaped > 0) * 255  # highlight labels in red
+    intensity_im[:,:,0] = (box_indices_imshaped > 0) * 255  # highlight labels in red
     plot_range_image_helper(intensity_im, 'labels', cmap=None)
     plt.savefig(out_dir / f'boxes.{filename_prefix}.png')
     plt.close(fig)
