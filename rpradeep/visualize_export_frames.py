@@ -1,7 +1,4 @@
-import itertools
-import os
 import sys
-from typing import NamedTuple
 
 import google.protobuf as pb
 import numpy as np
@@ -15,8 +12,6 @@ tf.enable_eager_execution()
 from waymo_open_dataset.utils import box_utils
 from waymo_open_dataset import dataset_pb2 as open_dataset
 from waymo_open_dataset.utils import frame_utils
-from waymo_open_dataset.utils import range_image_utils
-from waymo_open_dataset.utils import transform_utils
 
 
 class FrameInfo:
@@ -141,6 +136,7 @@ def lidar1_project_labels_on_range_image(frame_info: FrameInfo):
 
 
 def save_ply(points: np.ndarray, out_path: Path, transform=None, format='binary_little_endian') -> None:
+    if len(points) == 0: return
     assert points.dtype == np.float32
     assert format in ('ascii', 'binary_little_endian'), "Invalid PLY format!"
     if transform is not None:
@@ -241,7 +237,7 @@ def _unit_box_3D():
 UNIT_BOX_POINTS_3D = _unit_box_3D()
 
 
-def make_box_points(b) -> np.ndarray:
+def make_box_outline_points(b) -> np.ndarray:
     a = b.heading
     R = np.array([[np.cos(a),  -np.sin(a),  0.],
                   [np.sin(a),   np.cos(a),  0.],
@@ -258,21 +254,18 @@ def export_data(frame_info: FrameInfo,
                 write_visualization_files: bool=False) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # return info image tensor
+    # The following code only cares about the top lidar.
     top_lidar_first_return_raw = frame_info.range_images[open_dataset.LaserName.TOP][0]
+    ri_shape = top_lidar_first_return_raw.shape.dims
     top_lidar_first_returns = tf.convert_to_tensor(top_lidar_first_return_raw.data)
-    top_lidar_first_returns = tf.reshape(top_lidar_first_returns,
-                                top_lidar_first_return_raw.shape.dims)
-
-    # indicator arrays for point labels
-    cartesian = frame_utils.convert_range_image_to_cartesian(
+    top_lidar_first_returns = tf.reshape(top_lidar_first_returns, ri_shape)
+    top_lidar_xyz = frame_utils.convert_range_image_to_cartesian(
         frame_info.src_frame,
         frame_info.range_images,
         frame_info.range_image_top_pose,
-        ri_index=0)
-    ri_shape = cartesian[open_dataset.LaserName.TOP].shape
-    cartesian_flat = tf.reshape(cartesian[open_dataset.LaserName.TOP], (-1, 3))
-    
+        ri_index=0)[open_dataset.LaserName.TOP]
+    top_lidar_xyz_flat = tf.reshape(top_lidar_xyz, (-1, 3))
+
     def box_info_to_array(b) -> np.array:
         return np.array(
             [b.center_x, b.center_y, b.center_z, b.length, b.width, b.height, b.heading],
@@ -283,7 +276,7 @@ def export_data(frame_info: FrameInfo,
                                 for a in frame_info.src_frame.laser_labels if a.HasField('box')])
 
     # box_1hot.shape: (num_range_image_pixels, num_labels)
-    box_1hot = box_utils.is_within_box_3d(cartesian_flat, label_boxes).numpy()
+    box_1hot = box_utils.is_within_box_3d(top_lidar_xyz_flat, label_boxes).numpy()
     # box_indices.shape: (num_range_image_pixels,)
     box_indices = (box_1hot * np.arange(len(label_boxes))).max(axis=-1)
     nobox = (box_1hot.any(axis=-1) == False)
@@ -295,10 +288,17 @@ def export_data(frame_info: FrameInfo,
                             for i in range(num_box_props)]
 
     # Save lidar return data
-    out_data = np.dstack([top_lidar_first_returns.numpy(), box_indices_imshaped, *box_info_imshaped])
-    # out_data.shape: (12, range_image_height, range_image_width) = (12, 64, 2650)
-    out_data = np.einsum('hwc->chw', out_data).astype(np.float32)
-    np.save(out_dir / f'{filename_prefix}.npy', out_data, allow_pickle=False)
+    invalid_mask = top_lidar_first_returns[..., 0] < 0  # negative range
+    top_lidar_xyz_numpy = top_lidar_xyz.numpy()
+    top_lidar_xyz_numpy[invalid_mask] = 10000.
+    out_data = np.dstack([top_lidar_first_returns[..., :3].numpy(),  # range, intentsity, elongation (range < 0 if invalid)
+                          top_lidar_xyz_numpy,                       # cartesian xyz (10000 if invalid)
+                          top_lidar_first_returns[..., 3].numpy(),   # no_label_zone
+                          box_indices_imshaped,                      # box_index or -1
+                          *box_info_imshaped]).astype(np.float32)    # box_info arrays or -1
+    # out_data_chw.shape: (15, range_image_height, range_image_width) = (15, 64, 2650)
+    out_data_chw = np.einsum('hwc->chw', out_data).astype(np.float32)  # pytorch used (B,)C,H,W dimensions for arrays
+    np.save(out_dir / f'{filename_prefix}.npy', out_data_chw, allow_pickle=False)
 
     if not write_visualization_files:
         return
@@ -311,31 +311,23 @@ def export_data(frame_info: FrameInfo,
     plt.savefig(Path(out_dir / f'{filename_prefix}.png'))
     plt.close(fig)
 
-    # Convert the range image to a point cloud and save a .PLY
-    TOP_LIDAR = 0
-    points, _cp_points = frame_utils.convert_range_image_to_point_cloud(
-        frame_info.src_frame,
-        frame_info.range_images,
-        frame_info.camera_projections,
-        frame_info.range_image_top_pose,
-        keep_polar_features=True,
-        ri_index=0)
-    save_ply(points[TOP_LIDAR], Path(out_dir / f'{filename_prefix}_r0.ply'), transform=frame_info.world_from_frame)
-    points, _cp_points = frame_utils.convert_range_image_to_point_cloud(
-        frame_info.src_frame,
-        frame_info.range_images,
-        frame_info.camera_projections,
-        frame_info.range_image_top_pose,
-        keep_polar_features=True,
-        ri_index=1)
-    save_ply(points[TOP_LIDAR], Path(out_dir / f'{filename_prefix}_r1.ply'), transform=frame_info.world_from_frame)
+    # Extract point cloud from `out_data` and save a .PLY
+    valid_mask = (out_data[..., 0] > 0)
+    point_cloud = out_data[valid_mask, :6]
+    print(point_cloud.shape)
+    point_cloud = point_cloud.reshape(-1, 6)
+    save_ply(point_cloud, Path(out_dir / f'{filename_prefix}_r0.ply'), transform=frame_info.world_from_frame)
 
-    # Save PLYs of boxes
+    # Save PLYs of boxes and box contents
     for i, a in enumerate(frame_info.src_frame.laser_labels):
         if not a.HasField('box'): continue
-        p = make_box_points(a.box)
-        rie_p = np.hstack([np.zeros((len(p), 3), dtype=np.float32), p])
+        p = make_box_outline_points(a.box)
+        rie_p = np.hstack([np.zeros((len(p), 3), dtype=np.float32), p])  # Dummy (range, intensity, elongation)
         save_ply(rie_p, Path(out_dir) / f'{filename_prefix}.box{i:03d}.ply', transform=frame_info.world_from_frame)
+        mask = out_data[..., 7] == i  # indicator for points that belong to box i
+        box_points = out_data[mask, :6]
+        box_points[..., 3:] -= out_data[mask, 8:11]  # subtract box center; points are in box centered frame
+        save_ply(box_points, Path(out_dir) / f'{filename_prefix}.pts{i:03d}.ply', transform=None)
 
     # Save a visualization of box labels on the lidar intensity image
     fig = plt.figure(figsize=(64, 20))
@@ -359,7 +351,8 @@ def main():
         print('Frame', i, frame.context.name)
         export_data(frame_info,
                     out_dir=Path(f'/tmp/waymo_od_lidar/{frame.context.name}'),
-                    filename_prefix=f'{i:06d}')
+                    filename_prefix=f'{i:06d}',
+                    write_visualization_files=('--visualize' in sys.argv))
 
 if __name__ == '__main__':
     main()
