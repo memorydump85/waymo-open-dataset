@@ -321,9 +321,11 @@ def export_data(frame_info: FrameInfo,
     # Save PLYs of boxes and box contents
     for i, a in enumerate(frame_info.src_frame.laser_labels):
         if not a.HasField('box'): continue
+        # Box outline PLY
         p = make_box_outline_points(a.box)
         rie_p = np.hstack([np.zeros((len(p), 3), dtype=np.float32), p])  # Dummy (range, intensity, elongation)
         save_ply(rie_p, Path(out_dir) / f'{filename_prefix}.box{i:03d}.ply', transform=frame_info.world_from_frame)
+        # Box contents PLY
         mask = out_data[..., 7] == i  # indicator for points that belong to box i
         box_points = out_data[mask, :6]
         box_points[..., 3:] -= out_data[mask, 8:11]  # subtract box center; points are in box centered frame
