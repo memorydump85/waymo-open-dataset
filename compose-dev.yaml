@@ -5,7 +5,6 @@ services:
     - infinity
     build:
       context: ./devenv
-      dockerfile: ./devenv/Dockerfile
     init: true
     volumes:
     - type: bind
