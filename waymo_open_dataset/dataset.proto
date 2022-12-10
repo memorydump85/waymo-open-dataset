@@ -53,6 +53,7 @@ message CameraName {
     FRONT_RIGHT = 3;
     SIDE_LEFT = 4;
     SIDE_RIGHT = 5;
+
   }
 }
 
@@ -65,6 +66,7 @@ message LaserName {
     SIDE_LEFT = 3;
     SIDE_RIGHT = 4;
     REAR = 5;
+
   }
 }
 
@@ -113,6 +115,8 @@ message CameraCalibration {
     GLOBAL_SHUTTER = 5;
   }
   optional RollingShutterReadOutDirection rolling_shutter_direction = 6;
+
+
 }
 
 message LaserCalibration {
@@ -126,6 +130,7 @@ message LaserCalibration {
   optional double beam_inclination_max = 4;
   // Lidar frame to vehicle frame.
   optional Transform extrinsic = 5;
+
 
 }
 
@@ -239,8 +244,60 @@ message RangeImage {
   //   4: cyclist, i.e., the point corresponds to a cyclist label box.
   optional bytes range_image_flow_compressed = 5;
 
+  // Zlib compressed [H, W, 2] serialized version of MatrixInt32.
+  // To decompress:
+  // string val = ZlibDecompress(segmentation_label_compressed);
+  // MatrixInt32 segmentation_label.
+  // segmentation_label.ParseFromString(val);
+  // Inner dimensions are [instance_id, semantic_class].
+  //
+  // NOTE:
+  // 1. Only TOP LiDAR has segmentation labels.
+  // 2. Not every frame has segmentation labels. This field is not set if a
+  //    frame is not labeled.
+  // 3. There can be points missing segmentation labels within a labeled frame.
+  //    Their label are set to TYPE_NOT_LABELED when that happens.
+  optional bytes segmentation_label_compressed = 6;
+
   // Deprecated, do not use.
   optional MatrixFloat range_image = 1 [deprecated = true];
+}
+
+// Panoptic (instance + semantic) segmentation labels for a given camera image.
+// Associations can also be provided between each instance ID and a globally
+// unique ID across all frames.
+message CameraSegmentationLabel {
+  // The value used to separate instance_ids from different semantic classes.
+  // See the panoptic_label field for how this is used. Must be set to be
+  // greater than the maximum instance_id.
+  optional int32 panoptic_label_divisor = 1;
+  // A uint16 png encoded image, with the same resolution as the corresponding
+  // camera image. Each pixel contains a panoptic segmentation label, which is
+  // computed as:
+  // semantic_class_id * panoptic_label_divisor + instance_id.
+  // We set instance_id = 0 for pixels for which there is no instance_id.
+  // NOTE: Instance IDs in this label are only consistent within this camera
+  // image. Use instance_id_to_global_id_mapping to get cross-camera consistent
+  // instance IDs.
+  optional bytes panoptic_label = 2;
+  // A mapping between each panoptic label with an instance_id and a globally
+  // unique ID across all frames within the same sequence. This can be used to
+  // match instances across cameras and over time. i.e. instances belonging to
+  // the same object will map to the same global ID across all frames in the
+  // same sequence.
+  // NOTE: These unique IDs are not consistent with other IDs in the dataset,
+  // e.g. the bounding box IDs.
+  message InstanceIDToGlobalIDMapping {
+    optional int32 local_instance_id = 1;
+    optional int32 global_instance_id = 2;
+    // If false, the corresponding instance will not have consistent global ids
+    // between frames.
+    optional bool is_tracked = 3;
+  }
+  repeated InstanceIDToGlobalIDMapping instance_id_to_global_id_mapping = 3;
+  // The sequence id for this label. The above instance_id_to_global_id_mapping
+  // is only valid with other labels with the same sequence id.
+  optional string sequence_id = 4;
 }
 
 // All timestamps in this proto are represented as seconds since Unix epoch.
@@ -287,6 +344,12 @@ message CameraImage {
   // the exposure time and the actual sensor readout time.
   optional double camera_trigger_time = 7;
   optional double camera_readout_done_time = 8;
+
+  // Panoptic segmentation labels for this camera image.
+  // NOTE: Not every image has panoptic segmentation labels.
+  optional CameraSegmentationLabel camera_segmentation_label = 10;
+
+
 }
 
 // The camera labels associated with a given camera image. This message
@@ -316,25 +379,42 @@ message Frame {
   // to avoid huge protos.
   optional Context context = 1;
 
-  // Frame start time, which is the timestamp of the first top lidar spin
-  // within this frame.
+  // Frame start time, which is the timestamp of the first top LiDAR scan
+  // within this frame. Note that this timestamp does not correspond to the
+  // provided vehicle pose (pose).
   optional int64 timestamp_micros = 2;
-  // The vehicle pose.
+
+  // Frame vehicle pose. Note that unlike in CameraImage, the Frame pose does
+  // not correspond to the provided timestamp (timestamp_micros). Instead, it
+  // roughly (but not exactly) corresponds to the vehicle pose in the middle of
+  // the given frame. The frame vehicle pose defines the coordinate system which
+  // the 3D laser labels are defined in.
   optional Transform pose = 3;
+
+  // The camera images.
   repeated CameraImage images = 4;
+
+  // The LiDAR sensor data.
   repeated Laser lasers = 5;
+
+  // Native 3D labels that correspond to the LiDAR sensor data. The 3D labels
+  // are defined w.r.t. the frame vehicle pose coordinate system (pose).
   repeated Label laser_labels = 6;
-  // Lidar labels (laser_labels) projected to camera images. A projected
-  // label is the smallest image axis aligned rectangle that can cover all
-  // projected points from the 3d lidar label. The projected label is ignored if
-  // the projection is fully outside a camera image. The projected label is
-  // clamped to the camera image if it is partially outside.
+
+  // The native 3D LiDAR labels (laser_labels) projected to camera images. A
+  // projected label is the smallest image axis aligned rectangle that can cover
+  // all projected points from the 3d LiDAR label. The projected label is
+  // ignored if the projection is fully outside a camera image. The projected
+  // label is clamped to the camera image if it is partially outside.
   repeated CameraLabels projected_lidar_labels = 9;
-  // NOTE: if a camera identified by CameraLabels.name has an entry in this
-  // field, then it has been labeled, even though it is possible that there are
-  // no labeled objects in the corresponding image, which is identified by a
-  // zero sized CameraLabels.labels.
+
+  // Native 2D camera labels. Note that if a camera identified by
+  // CameraLabels.name has an entry in this field, then it has been labeled,
+  // even though it is possible that there are no labeled objects in the
+  // corresponding image, which is identified by a zero sized
+  // CameraLabels.labels.
   repeated CameraLabels camera_labels = 8;
+
   // No label zones in the *global* frame.
   repeated Polygon2dProto no_label_zones = 7;
 }

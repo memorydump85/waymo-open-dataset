@@ -21,10 +21,12 @@ limitations under the License.
 
 #include <glog/logging.h>
 #include "absl/base/attributes.h"
+#include "waymo_open_dataset/label.pb.h"
 #include "waymo_open_dataset/math/aabox2d.h"
 #include "waymo_open_dataset/math/box2d.h"
 #include "waymo_open_dataset/math/polygon2d.h"
 #include "waymo_open_dataset/math/vec2d.h"
+#include "waymo_open_dataset/protos/metrics.pb.h"
 
 namespace waymo {
 namespace open_dataset {
@@ -34,6 +36,12 @@ constexpr double kEpsilon = 1e-6;
 // Min,max box dimensions (length, width, height).
 constexpr double kMinBoxDim = 1e-2;
 constexpr double kMaxBoxDim = 1e6;
+
+// Implements std::clamp from C++17.
+template <typename T>
+T Clamp(const T& v, const T& lo, const T& hi) {
+  return std::max(lo, std::min(v, hi));
+}
 
 // Returns true if the closed interval [min1, max1] overlaps at all with the
 // closed interval [min2, max2]. If overlap_min and overlap_max are not
@@ -65,6 +73,34 @@ Box2d ToBox2d(const Label::Box& box) {
 AABox2d<double> ToAABox2d(const Label::Box& box) {
   return AABox2d<double>(box.center_x(), box.center_y(), box.length() * 0.5,
                          box.width() * 0.5);
+}
+
+// Computes the dot product of the centers of two boxes.
+double CenterDotProduct(const Label::Box& box1, const Label::Box& box2) {
+  return (box1.center_x() * box2.center_x()) +
+         (box1.center_y() * box2.center_y()) +
+         (box1.center_z() * box2.center_z());
+}
+
+// Computes the square of the length from the box center to the origin.
+double CenterVectorLengthSquare(const Label::Box& box) {
+  return box.center_x() * box.center_x() + box.center_y() * box.center_y() +
+         box.center_z() * box.center_z();
+}
+
+// Computes the length from the box center to the origin.
+double CenterVectorLength(const Label::Box& box) {
+  return sqrt(CenterVectorLengthSquare(box));
+}
+
+// Apply translation to a 3D box proto.
+Label::Box TranslateBox(const Label::Box& box, const double& t_x,
+                        const double& t_y, const double& t_z) {
+  Label::Box translated_box(box);
+  translated_box.set_center_x(box.center_x() + t_x);
+  translated_box.set_center_y(box.center_y() + t_y);
+  translated_box.set_center_z(box.center_z() + t_z);
+  return translated_box;
 }
 }  // namespace
 
@@ -196,5 +232,129 @@ double ComputeIoU(const Label::Box& b1, const Label::Box& b2,
   return 0.0;
 }
 
+double ComputeLongitudinalAffinity(
+    const Label::Box& prediction_box, const Label::Box& ground_truth_box,
+    const Config::LongitudinalErrorTolerantConfig& let_metric_config) {
+  // Transform the boxes into the sensor coordinate system.
+  const Label::Box calibrated_prediction_box =
+      TranslateBox(prediction_box, -let_metric_config.sensor_location().x(),
+                   -let_metric_config.sensor_location().y(),
+                   -let_metric_config.sensor_location().z());
+  const Label::Box calibrated_ground_truth_box =
+      TranslateBox(ground_truth_box, -let_metric_config.sensor_location().x(),
+                   -let_metric_config.sensor_location().y(),
+                   -let_metric_config.sensor_location().z());
+
+  // Dot product between the ground truth center vector and the prediction
+  // center vector.
+  const double gt_dot_pd =
+      CenterDotProduct(calibrated_prediction_box, calibrated_ground_truth_box);
+  const double gt_range =
+      std::max(CenterVectorLength(calibrated_ground_truth_box), kEpsilon);
+  const double pd_range =
+      std::max(CenterVectorLength(calibrated_prediction_box), kEpsilon);
+
+  // Compute the cos(theta), where theta is the angle between the center vectors
+  // of prediction and ground truth.
+  const double cos_of_gt_pd_angle =
+      Clamp(gt_dot_pd / gt_range / pd_range, 0.0, 1.0);
+
+  // Compute the error terms as a percentage of the max tolerance.
+  const float max_range_tolerance_meter =
+      std::max(let_metric_config.longitudinal_tolerance_percentage() * gt_range,
+               static_cast<double>(
+                   let_metric_config.min_longitudinal_tolerance_meter()));
+  const double range_error = std::abs(
+      (pd_range * cos_of_gt_pd_angle - gt_range) / max_range_tolerance_meter);
+  // Convert to affinity with value range [0.0, 1.0].
+  return Clamp(1.0 - range_error, 0.0, 1.0);
+}
+
+ComputeLongitudinalAffinityFunc GetComputeLongitudinalAffinityFunc(
+    const Config::LongitudinalErrorTolerantConfig& let_metric_config) {
+  ComputeLongitudinalAffinityFunc let_compute_longitudinal_affinity_func =
+      [&let_metric_config](const Label::Box& prediction_box,
+                           const Label::Box& ground_truth_box) {
+        return ComputeLongitudinalAffinity(prediction_box, ground_truth_box,
+                                           let_metric_config);
+      };
+  return let_compute_longitudinal_affinity_func;
+}
+
+Label::Box AlignedPredictionBox(
+    const Label::Box& prediction_box, const Label::Box& ground_truth_box,
+    Config::LongitudinalErrorTolerantConfig::AlignType align_type) {
+  Label::Box aligned_prediction_box = Label::Box(prediction_box);
+  switch (align_type) {
+    case Config::LongitudinalErrorTolerantConfig::TYPE_NOT_ALIGNED:
+      // No alignment is performed.
+      break;
+    case Config::LongitudinalErrorTolerantConfig::TYPE_CENTER_ALIGNED:
+      // Moves the prediction box's center to be same as ground truth.
+      aligned_prediction_box.set_center_x(ground_truth_box.center_x());
+      aligned_prediction_box.set_center_y(ground_truth_box.center_y());
+      break;
+    case Config::LongitudinalErrorTolerantConfig::TYPE_RANGE_ALIGNED: {
+      // To move the prediction box's center along the line of sight so that
+      // it has the closest distance to the ground truth box's center, the
+      // projected vector can be described as:
+      //   P' = |G|* cos(theta) * P/|P| = dot(G, P)/|P|^2 * P,
+      // where G = [gt_x, gt_y, gt_z] and P = [pd_x, pd_y, pd_z] are the vectors
+      // that describe the centers of a ground truth box and a prediction box.
+      const double gt_dot_pd =
+          CenterDotProduct(prediction_box, ground_truth_box);
+      const double pd_range_sq =
+          std::max(CenterVectorLengthSquare(prediction_box), kEpsilon);
+      const double range_multiplier = gt_dot_pd / pd_range_sq;
+      aligned_prediction_box.set_center_x(prediction_box.center_x() *
+                                          range_multiplier);
+      aligned_prediction_box.set_center_y(prediction_box.center_y() *
+                                          range_multiplier);
+      aligned_prediction_box.set_center_z(prediction_box.center_z() *
+                                          range_multiplier);
+      break;
+    }
+    case Config::LongitudinalErrorTolerantConfig::TYPE_UNKNOWN:
+      LOG(FATAL) << "Unknown IoU type.";
+  }
+  return aligned_prediction_box;
+}
+
+double ComputeLetIoU(
+    const Label::Box& prediction_box, const Label::Box& ground_truth_box,
+    const Config::LongitudinalErrorTolerantConfig::Location3D& sensor_location,
+    Config::LongitudinalErrorTolerantConfig::AlignType align_type,
+    Label::Box::Type box_type) {
+  CHECK(box_type == Label::Box::TYPE_3D || box_type == Label::Box::TYPE_2D)
+      << "Only TYPE_3D and TYPE_2D boxes are supported in LET IoU, current "
+         "type: "
+      << Label::Box::Type_Name(box_type);
+  // Transform the boxes into the sensor coordinate system.
+  const Label::Box calibrated_prediction_box =
+      TranslateBox(prediction_box, -sensor_location.x(), -sensor_location.y(),
+                   -sensor_location.z());
+  const Label::Box calibrated_ground_truth_box =
+      TranslateBox(ground_truth_box, -sensor_location.x(), -sensor_location.y(),
+                   -sensor_location.z());
+  const Label::Box aligned_prediction_box = AlignedPredictionBox(
+      calibrated_prediction_box, calibrated_ground_truth_box, align_type);
+
+  return ComputeIoU(aligned_prediction_box, calibrated_ground_truth_box,
+                    box_type);
+}
+
+ComputeIoUFunc GetComputeLetIoUFunc(
+    const Config::LongitudinalErrorTolerantConfig::Location3D& sensor_location,
+    Config::LongitudinalErrorTolerantConfig::AlignType align_type,
+    Label::Box::Type box_type) {
+  ComputeIoUFunc compute_let_iou_func =
+      [&sensor_location, align_type, box_type](
+          const Label::Box& prediction_box,
+          const Label::Box& ground_truth_box) {
+        return ComputeLetIoU(prediction_box, ground_truth_box, sensor_location,
+                             align_type, box_type);
+      };
+  return compute_let_iou_func;
+}
 }  // namespace open_dataset
 }  // namespace waymo

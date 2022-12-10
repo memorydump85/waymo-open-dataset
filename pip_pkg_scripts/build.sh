@@ -33,12 +33,32 @@ else
   PYTHON="python${PYTHON_VERSION}.${PYTHON_MINOR_VERSION}"
 fi
 
+# Force Keras release compatibility with TensorFlow releases.
+# https://github.com/keras-team/keras#release-and-compatibility
+case "$TF_VERSION" in
+  2.5.*)
+    export KERAS_VERSION='2.5.0rc0'
+    ;;
+  2.6.*)
+    export KERAS_VERSION='2.6.0'
+    ;;
+  2.7.*)
+    export KERAS_VERSION='2.7.0'
+    ;;
+  2.8.*)
+    export KERAS_VERSION='2.8.0'
+    ;;
+  *)
+    export KERAS_VERSION='nightly'
+esac
+
 curl https://bootstrap.pypa.io/get-pip.py -o get-pip.py
 $PYTHON get-pip.py --user
 
 PIP="$PYTHON -m pip"
 
 ${PIP} install --upgrade setuptools --user
+${PIP} install --upgrade keras=="$KERAS_VERSION" --user
 ${PIP} install --upgrade tensorflow=="${TF_VERSION}" --user
 
 ./configure.sh
@@ -52,6 +72,6 @@ rm -rf "$DST_DIR" || true
 ./pip_pkg_scripts/build_pip_pkg.sh "$DST_DIR" ${PYTHON_VERSION}
 # Comment the following line if you run this outside of the container.
 if [[ "${PIP_MANYLINUX2010}" == "1" ]]; then
-  find "$DST_DIR" -name *.whl | xargs ./third_party/auditwheel.sh repair --plat manylinux2010_x86_64 -w "$DST_DIR"
+  find "$DST_DIR" -name *.whl | xargs $PYTHON ./third_party/auditwheel_wrapper.py repair --plat manylinux2010_x86_64 -w "$DST_DIR"
 fi
 

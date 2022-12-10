@@ -46,6 +46,9 @@ Polygon2dProto BuildNLZ(const std::vector<double>& x,
 // Builds a default metrics config used in unit tests.
 Config BuildDefaultConfig();
 
+// Builds a default longitudinal error tolerant (LET) config.
+Config::LongitudinalErrorTolerantConfig BuildDefaultLetConfig();
+
 }  // namespace open_dataset
 }  // namespace waymo
 

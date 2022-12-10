@@ -11,6 +11,7 @@ cc_library(
     srcs = ["breakdown_generator.cc"],
     hdrs = ["breakdown_generator.h"],
     deps = [
+        "//waymo_open_dataset:dataset_cc_proto",
         "//waymo_open_dataset:label_cc_proto",
         "//waymo_open_dataset/protos:breakdown_cc_proto",
         "//waymo_open_dataset/protos:metrics_cc_proto",
@@ -56,12 +57,14 @@ cc_library(
     name = "iou",
     srcs = ["iou.cc"],
     hdrs = ["iou.h"],
+
     deps = [
         "//waymo_open_dataset:label_cc_proto",
         "//waymo_open_dataset/math:aabox2d",
         "//waymo_open_dataset/math:box2d",
         "//waymo_open_dataset/math:polygon2d",
         "//waymo_open_dataset/math:vec2d",
+        "//waymo_open_dataset/protos:metrics_cc_proto",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_glog//:glog",
     ],
@@ -71,6 +74,7 @@ cc_library(
     name = "hungarian",
     srcs = ["hungarian.cc"],
     hdrs = ["hungarian.h"],
+
     deps = [
         "@com_google_glog//:glog",
     ],
@@ -80,6 +84,7 @@ cc_library(
     name = "matcher",
     srcs = ["matcher.cc"],
     hdrs = ["matcher.h"],
+
     deps = [
         ":hungarian",
         ":iou",
@@ -126,6 +131,20 @@ cc_library(
         "//waymo_open_dataset:label_cc_proto",
         "//waymo_open_dataset/protos:breakdown_cc_proto",
         "//waymo_open_dataset/protos:metrics_cc_proto",
+        "@com_google_glog//:glog",
+    ],
+)
+
+cc_library(
+    name = "segmentation_metrics",
+    srcs = ["segmentation_metrics.cc"],
+    hdrs = ["segmentation_metrics.h"],
+    deps = [
+        "//waymo_open_dataset/common:integral_types",
+        "//waymo_open_dataset/common:status",
+        "//waymo_open_dataset/protos:segmentation_cc_proto",
+        "//waymo_open_dataset/protos:segmentation_metrics_cc_proto",
+        "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_glog//:glog",
     ],
 )
@@ -200,9 +219,11 @@ cc_test(
 cc_test(
     name = "motion_metrics_test",
     srcs = ["motion_metrics_test.cc"],
+
     deps = [
         ":motion_metrics",
         "@com_google_glog//:glog",
+
         # Implicit proto dependency.
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
@@ -219,6 +240,7 @@ cc_test(
         ":iou",
         ":test_utils",
         "//waymo_open_dataset:label_cc_proto",
+        "//waymo_open_dataset/protos:metrics_cc_proto",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],
@@ -230,6 +252,7 @@ cc_test(
     deps = [
         ":breakdown_generator",
         ":test_utils",
+        "//waymo_open_dataset:dataset_cc_proto",
         "//waymo_open_dataset:label_cc_proto",
         "//waymo_open_dataset/protos:breakdown_cc_proto",
         "//waymo_open_dataset/protos:metrics_cc_proto",
@@ -313,6 +336,18 @@ cc_test(
         "//waymo_open_dataset/protos:breakdown_cc_proto",
         "//waymo_open_dataset/protos:metrics_cc_proto",
         "@com_google_absl//absl/strings",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "segmentation_metrics_test",
+    srcs = ["segmentation_metrics_test.cc"],
+    deps = [
+        ":segmentation_metrics",
+        "//waymo_open_dataset/protos:segmentation_cc_proto",
+        "@com_google_absl//absl/status",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],
