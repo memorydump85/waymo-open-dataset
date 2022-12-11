@@ -1,0 +1,6 @@
+*.so
+*.descr
+*.npy
+*.tfrecord*
+descriptors/*
+trajectories/*
