@@ -1,2 +1,4 @@
 BasedOnStyle: Google
+BinPackParameters: false
+BinPackArguments: false
 ColumnLimit: 100

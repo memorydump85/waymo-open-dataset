@@ -1,2 +1,4 @@
 [style]
 column_limit=100
+join_multiple_lines=true
+blank_line_before_nested_class_or_def=1
