@@ -1,6 +1,8 @@
+*.o
 *.so
 *.descr
 *.npy
 *.tfrecord*
+*.x
 descriptors/*
 trajectories/*

@@ -2,7 +2,7 @@ all: descriptors.so
 
 run-tests: descriptors_test.x descriptors.so
 	./descriptors_test.x
-	python3 -m nose2
+	python3 -m nose2 --verbose
 
 format-sources:
 	clang-format-12 -i *.cc *.h
@@ -18,7 +18,8 @@ descriptors.so: descriptors_pybind.cc descriptors.o
     descriptors_pybind.cc descriptors.o -lboost_iostreams -lglog -o $@
 
 descriptors_test.x: descriptors_test.cc descriptors.o
-	g++ $^ -lglog -lboost_iostreams -lgtest -pthread -o $@
+	g++ -O3 -Wall -Werror -std=c++17 \
+    $^ -lglog -lboost_iostreams -lgtest -pthread -o $@
 
 clean:
 	rm -f *.so *.o *.x

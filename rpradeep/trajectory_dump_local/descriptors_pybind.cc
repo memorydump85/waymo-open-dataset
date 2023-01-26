@@ -43,10 +43,6 @@ PYBIND11_MODULE(descriptors, m) {
       .def_readonly("seg_id", &TrackSegmentShapeDescriptor::seg_id)
       .def("raw_bytes", &pyPackTrackShapeDescriptor);
 
-  m.def("pack_track_shape_descr",
-        &pyPackTrackShapeDescriptor,
-        "Serialize a track shape description into bytes.");
-
   py::class_<TrackSegmentMatchInfo>(m, "TrackSegmentMatchInfo")
       .def_readonly("dist", &TrackSegmentMatchInfo::dist)
       .def_readonly("index", &TrackSegmentMatchInfo::index)

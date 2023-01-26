@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include <boost/filesystem.hpp>
+#include <chrono>
 #include <cmath>
 
 TEST(BestKHeap, Insertion) {
@@ -56,17 +57,22 @@ TEST(findNearest, AllPermuttionsSize8) {
 class findNearestPerformance : public ::testing::Test {
  protected:
   void SetUp() override {
-    GTEST_SKIP() << "This test should be explicitly enabled by commenting out this line.";
+    // GTEST_SKIP() << "This test should be explicitly enabled by commenting out this line.";
     auto result = findNearest(descrs.data(), descrs.data() + descrs.size(), descrs.back().descr, 1);
   }
 
   const std::vector<TrackSegmentShapeDescriptor> descrs{32 * 1024 * 1024};
 };
 
-TEST_F(findNearestPerformance, Query64) {
-  LOG(INFO) << "start";
-  auto result = findNearest(descrs.data(), descrs.data() + descrs.size(), descrs.back().descr, 4);
-  LOG(INFO) << "done";
+TEST_F(findNearestPerformance, Query8) {
+  using namespace std::chrono;
+  auto start = high_resolution_clock::now();
+  auto result = findNearest(descrs.data(), descrs.data() + descrs.size(), descrs.back().descr, 8);
+  auto end = high_resolution_clock::now();
+  auto elapsed = end - start;
+  LOG(INFO) << "Elapsed: " << duration_cast<milliseconds>(elapsed).count() / 1000. << "s";
+  using namespace std::chrono_literals;
+  EXPECT_LT(elapsed, 6000ms) << "Possible performance regression in findNearest!";
 }
 
 int main(int argc, char** argv) {

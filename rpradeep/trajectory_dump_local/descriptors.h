@@ -24,7 +24,8 @@ static_assert(sizeof(TrackSegmentShapeDescriptor) % sizeof(std::size_t) == 0,
               "sizeof(TrackSegmentShapeDescriptor) must be exactly aligned "
               "with the machine word size.");
 
-// How close is a track-segment to a specific reference / query segment?
+// Information for a matched track-segment: how close is it to a
+// specific reference / query segment?
 struct TrackSegmentMatchInfo {
   float32_t dist;
   int64_t index;

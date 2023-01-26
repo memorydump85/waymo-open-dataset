@@ -51,17 +51,21 @@ def write_shape_descriptors_to(scenario_msg: Scenario, outfile: T.BinaryIO) -> N
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--outdir", "-o", type=pathlib.Path,
+                        default=pathlib.Path("."),
+                        help="Output directory.")
     parser.add_argument("scenario_tfrecord", type=pathlib.Path)
     args = parser.parse_args()
 
-    dataset = tf.data.TFRecordDataset(args.scenario_tfrecord, compression_type='')
-    buf = io.BytesIO()
-    for str_rec in dataset:
-        scenario_msg = Scenario()
-        scenario_msg.ParseFromString(str_rec.numpy())
-        write_shape_descriptors_to(scenario_msg, buf)
-
-    print(f"Output size: {buf.tell() / 1024 / 1024} MB.")
+    outfile_path = args.outdir / "descriptors" / f"{args.scenario_tfrecord.name}.descrs"
+    outfile_path.parent.mkdir(parents=True, exist_ok=True)
+    with outfile_path.open("wb") as f:
+        dataset = tf.data.TFRecordDataset(args.scenario_tfrecord, compression_type='')
+        buf = io.BytesIO()
+        for str_rec in dataset:
+            scenario_msg = Scenario()
+            scenario_msg.ParseFromString(str_rec.numpy())
+            write_shape_descriptors_to(scenario_msg, f)
 
 if __name__ == '__main__':
     main()

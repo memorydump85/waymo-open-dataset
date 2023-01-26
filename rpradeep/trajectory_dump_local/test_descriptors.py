@@ -9,7 +9,7 @@ import numpy as np
 import descriptors
 
 
-class TestFindNearest(unittest.TestCase):
+class TestDescriptors(unittest.TestCase):
 
     def setUp(self):
         self._zero_descr = np.zeros(descriptors.descr_array_size(), dtype=np.float32)
@@ -22,7 +22,18 @@ class TestFindNearest(unittest.TestCase):
                 v = [x] + ([0] * (descriptors.descr_array_size() - 1))
                 f.write(descriptors.TrackSegmentShapeDescriptor(v, i, i, i).raw_bytes())
 
-    def test_find_nearest(self):
+    def test_TrackSegmentShapeDescriptor_ValidInputArray(self):
+        descriptors.TrackSegmentShapeDescriptor(self._zero_descr, 1, 11, 111)
+
+    def test_TrackSegmentShapeDescriptor_InvalidInputArray(self):
+        invalid_descr_array = np.zeros(descriptors.descr_array_size() + 1, dtype=np.float32)
+        with self.assertRaises(TypeError):
+            descriptors.TrackSegmentShapeDescriptor(invalid_descr_array, 1, 11, 111)
+        invalid_descr_array = invalid_descr_array[:-2]
+        with self.assertRaises(TypeError):
+            descriptors.TrackSegmentShapeDescriptor(invalid_descr_array, 2, 22, 222)
+
+    def test_FindNearest_ZerosInAllZerosFlatFile(self):
         mmap = np.memmap(self._tmpfile_path_str, mode='r')
         nearest = descriptors.find_nearest(mmap, self._zero_descr, 4)
         self.assertEqual(nearest[0].dist, 0.)

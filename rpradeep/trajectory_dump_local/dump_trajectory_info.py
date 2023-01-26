@@ -6,10 +6,10 @@ import typing as T
 
 import glog
 import numpy as np
-import scipy
 import tensorflow as tf
 
 from waymo_open_dataset.protos.scenario_pb2 import Scenario, Track
+from trajectory_util import generate_track_array_segments, compute_shape_descriptor
 import descriptors
 
 
@@ -35,19 +35,15 @@ def write_shape_descriptors_to(scenario_msg: Scenario, outfile: T.BinaryIO) -> N
         SHAPE_DESCR_NPOINTS = 6
 
         # Iterate over overlapping track segments and produce descriptors.
-        for i in range(0, len(xyv) - SHAPE_DESCR_NPOINTS):
-            seg = xyv[i:i + SHAPE_DESCR_NPOINTS]
+        for i, seg in enumerate(generate_track_array_segments(xyv)):
             if (seg[:, 2] < 1).any():
                 continue  # segments had some invalid state before aggregation.
-            seg_xy = seg[:, :2]
-            pair_dists = scipy.spatial.distance_matrix(seg_xy, seg_xy).astype(np.float32)
-            descr = np.hstack([np.diag(pair_dists, k) for k in (1, 2, 3)])
-            assert len(descr.shape) == 1
-            assert descr.dtype == np.float32
-            outfile.write(descriptors.pack_track_shape_descr(descr, scenario_id, track.id, i))
+            seg_descr = descriptors.TrackSegmentShapeDescriptor(
+                compute_shape_descriptor(seg[:, :2]), scenario_id, track.id, i)
+            outfile.write(seg_descr.raw_bytes())
 
     assert outfile.tell() % 64 == 0, \
-        f"num bytes written out: {outfile.tell()} must be a multiple of 64"
+        f"num bytes written out: {outfile.tell()} must be a multiple of 64 for best performance."
 
 
 def write_track_trajectories_to_files(scenario_msg: Scenario, outdir: pathlib.Path) -> None:
@@ -60,15 +56,15 @@ def write_track_trajectories_to_files(scenario_msg: Scenario, outdir: pathlib.Pa
 
     arrays = {}
     for track in scenario_msg.tracks:
-        txy = np.array([(t, s.center_x, s.center_y)
-                        for t, s in zip(tstamps, track.states) if s.valid],
+        txy = np.array([(t, s.center_x, s.center_y) if s.valid else (t, float('NaN'), float('NaN'))
+                        for t, s in zip(tstamps, track.states)],
                        dtype=np.float32)
-        arrays["{track.id:06d}--{track.object_type:1d}"] = txy
+        arrays[f"{track.id:06d}--{track.object_type:1d}"] = txy
 
     outfile_path = outdir / f"scen:{scenario_msg.scenario_id}.npz"
     outfile_path.parent.mkdir(parents=True, exist_ok=True)
     with outfile_path.open("wb") as f:
-        np.savez_compressed(f, arrays)
+        np.savez_compressed(f, **arrays)
 
 
 def main():
